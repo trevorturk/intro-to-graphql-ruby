@@ -518,8 +518,24 @@ query {
 
 # Where to protect data?
 
-* Top-level in `QueryType`
 * Per-field in `PostType`, `AuthorType`, etc
+* Top-level in `QueryType`
+
+---
+
+# Top-level protection
+
+```ruby
+class QueryType < Types::BaseObject
+  field :authors, [Types::AuthorType], null: true, description: "All Authors, admin only"
+
+  def authors
+    if context[:current_user].admin?
+      Author.all
+    end
+  end
+end
+```
 
 ---
 
@@ -583,26 +599,6 @@ class QueryType < Types::BaseObject
 
   def post(id:)
     Post.published.find_by_id(id)
-  end
-end
-```
-
----
-
-# Also find draft posts
-
-```ruby
-class QueryType < Types::BaseObject
-  field :post, Types::PostType, null: true do
-    argument :id, ID, required: true
-  end
-
-  def post(id:)
-    if context[:current_user]
-      context[:current_user].posts.find_by_id(id)
-    else
-      Post.published.find_by_id(id)
-    end
   end
 end
 ```
@@ -728,24 +724,24 @@ Loaders::FindLoader.for(Post, current_user: context[:current_user]).load(id)
 
 ---
 
-# Splitting user-specific fields
+# Avoiding Complex Loaders
 
-* You can simplify things for yourself by introducing specialized fields
+* You can simplify things with arguments, namespaces, and custom fields
 
 ```
 query {
-  me {
-    posts(include_drafts: true) {
-      title
-    }
+  posts(include_drafts: true) {
+    title
   }
 }
 ```
 
 ```
 query {
-  my_draft_posts {
-    title
+  me {
+    draft_posts {
+      title
+    }    
   }
 }
 ```
@@ -764,23 +760,136 @@ query {
 
 # Pagination
 
-* Consider limit/offset, page, or [Relay connections](https://graphql-ruby.org/relay/connections.html)
+* Consider limit/offset, page, or graphql-ruby's built-in [Relay connections](https://graphql-ruby.org/relay/connections.html):
+
+```ruby
+class AuthorType < Types::BaseObject
+  field :posts, PostType.connection_type, null: true
+
+  def posts
+    object.posts
+  end
+end
+```
+
+---
 
 ```
-{
-  author {
-    posts(first: 10, after: "abc123") {
+query {
+  authors {
+    name
+    paginatedPosts(first: 1) {
       edges {
-        cursor
         node {
-          id
-          name
+          title
         }
       }
       pageInfo {
         hasNextPage
+        endCursor
       }
     }
+  }
+}
+```
+
+---
+
+```
+{
+  "data": {
+    "authors": [
+      {
+        "name": "John",
+        "paginatedPosts": {
+          "edges": [
+            {
+              "node": {
+                "title": "John's post"
+              }
+            }
+          ],
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": "MQ"
+          }
+        }
+      },
+      {
+        "name": "Jane",
+        "paginatedPosts": {
+          "edges": [
+            {
+              "node": {
+                "title": "Jane's post"
+              }
+            }
+          ],
+          "pageInfo": {
+            "hasNextPage": true,
+            "endCursor": "MQ"
+          }
+        }
+      }
+    ]
+  }
+}
+```
+
+---
+
+```
+query {
+  authors {
+    name
+    paginatedPosts(first: 1, after: "MQ") {
+      edges {
+        node {
+          title
+        }
+      }
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+    }
+  }
+}
+```
+
+---
+
+```
+{
+  "data": {
+    "authors": [
+      {
+        "name": "John",
+        "paginatedPosts": {
+          "edges": [],
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": null
+          }
+        }
+      },
+      {
+        "name": "Jane",
+        "paginatedPosts": {
+          "edges": [
+            {
+              "node": {
+                "title": "Jane's draft post"
+              }
+            }
+          ],
+          "pageInfo": {
+            "hasNextPage": true,
+            "endCursor": "Mg"
+          }
+        }
+      }
+    ]
   }
 }
 ```
@@ -855,7 +964,7 @@ end
 }
 ```
 
-* Note that you'll want to allow a large enough max complexity and depth so that your [introspection query](https://github.com/rmosolgo/graphql-ruby/blob/master/guides/schema/introspection.md) will work.
+* Note that you'll want to allow a large enough max complexity and depth so that your [introspection query](https://github.com/rmosolgo/graphql-ruby/blob/master/guides/schema/introspection.md) will work
 
 ---
 
@@ -879,6 +988,8 @@ class CreatePost < BaseMutation
   end
 end
 ```
+
+* Note Shopify has a [recommendation](https://github.com/Shopify/graphql-design-tutorial/blob/master/TUTORIAL.md#input-structure-part-1) for naming mutations
 
 ---
 
@@ -960,7 +1071,6 @@ module Types
     field :message, String, null: false
   end
 end
-
 ```
 
 ---
@@ -1021,6 +1131,8 @@ mutation createPost {
 }
 ```
 
+* Note graphql-ruby has a [recommendation](https://graphql-ruby.org/mutations/mutation_errors) for formatting mutation errors
+
 ---
 
 # [graphql-client](https://github.com/github/graphql-client)
@@ -1036,20 +1148,17 @@ require "graphql/client"
 require "graphql/client/http"
 
 module Graph
-  begin
-    HTTP = GraphQL::Client::HTTP.new("http://localhost:3000/graphql")
-    Schema = GraphQL::Client.load_schema(HTTP)
-    Client = GraphQL::Client.new(schema: Schema, execute: HTTP)
+  HTTP = GraphQL::Client::HTTP.new("http://localhost:3000/graphql")
+  Schema = GraphQL::Client.load_schema(HTTP)
+  Client = GraphQL::Client.new(schema: Schema, execute: HTTP)
 
-    PostsQuery = Client.parse <<-'GRAPHQL'
-      query {
-        posts {
-          title
-        }
+  PostsQuery = Client.parse <<-'GRAPHQL'
+    query {
+      posts {
+        title
       }
-    GRAPHQL
-  rescue
-  end
+    }
+  GRAPHQL
 end
 ```
 

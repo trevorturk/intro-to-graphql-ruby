@@ -12,5 +12,11 @@ module Types
         object.posts.published.all
       end
     end
+
+    field :paginated_posts, PostType.connection_type, null: true
+
+    def paginated_posts
+      object.posts
+    end
   end
 end
